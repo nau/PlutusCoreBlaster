@@ -67,6 +67,15 @@ example :
     ]
   ) = .some (s2ba "\xd8\x79\x9f\x1a\x08\x9a\xfe\x76\x19\x58\xb6\x1b\x00\x00\x00\x01\x05\x87\x4b\xa1\xff") := by native_decide
 
+-- Bignum encoding (magnitude ≥ 2^64) goes through `itos`, which must be big-endian (Spec B.6).
+example : itos 258 = s2ba "\x01\x02" := by native_decide
+-- Positive bignum: CBOR tag 2 (0xc2), then a 9-byte bytestring 01 00…00 for 2^64.
+example : encodeData (.I 18446744073709551616) =
+  .some (s2ba "\xc2\x49\x01\x00\x00\x00\x00\x00\x00\x00\x00") := by native_decide
+-- Negative bignum: CBOR tag 3 (0xc3); the encoded magnitude is -n-1 = 2^64.
+example : encodeData (.I (-18446744073709551617)) =
+  .some (s2ba "\xc3\x49\x01\x00\x00\x00\x00\x00\x00\x00\x00") := by native_decide
+
 -- ==============
 -- =  Decoding  =
 -- ==============
@@ -107,24 +116,24 @@ example : decodeData (s2ba "\xd8\x79\x9f\x1a\x08\x9a\xfe\x76\x19\x58\xb6\x1b\x00
 -- Empty collections encode as a DEFINITE empty array (0x80), matching the on-chain
 -- serialiseData builtin (aiken/cbor.serialise), not an indefinite 0x9f..0xff.
 -- (The List [], Constr 0, and nested cases are byte-anchored in the reference fixtures below.)
-example : encodeData (.Constr 1 []) = .some "\xd8\x7a\x80" := by native_decide
-example : encodeData (.Constr 7 []) = .some "\xd9\x05\x00\x80" := by native_decide
+example : encodeData (.Constr 1 []) = .some ⟨#[0xd8, 0x7a, 0x80]⟩ := by native_decide
+example : encodeData (.Constr 7 []) = .some ⟨#[0xd9, 0x05, 0x00, 0x80]⟩ := by native_decide
 
 -- decodeData round-trips negative bignums (tag 3), not just positive (tag 2).
-example : (encodeData (.I (-(2 ^ 512 + 1)))).bind decodeData = .some ("", .I (-(2 ^ 512 + 1))) := by native_decide
+example : (encodeData (.I (-(2 ^ 512 + 1)))).bind decodeData = .some (.empty, .I (-(2 ^ 512 + 1))) := by native_decide
 
 -- Byte-anchored DECODE vector pinning the tag-1/tag-3 boundary: `-(2^64)` is the largest negative
 -- on the major-type-1 side. `-(2^64+1)` (first tag-3 negative bignum) is byte-anchored in the
 -- reference fixtures below, and would decode wrong under the old `1 - m` sign bug.
-example : decodeData "\x3b\xff\xff\xff\xff\xff\xff\xff\xff" = .some ("", .I (-(2 ^ 64))) := by native_decide
-example : (encodeData (.I (2 ^ 512))).bind decodeData = .some ("", .I (2 ^ 512)) := by native_decide
-example : (encodeData (.Constr 1 [])).bind decodeData = .some ("", .Constr 1 []) := by native_decide
+example : decodeData ⟨#[0x3b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]⟩ = .some (.empty, .I (-(2 ^ 64))) := by native_decide
+example : (encodeData (.I (2 ^ 512))).bind decodeData = .some (.empty, .I (2 ^ 512)) := by native_decide
+example : (encodeData (.Constr 1 [])).bind decodeData = .some (.empty, .Constr 1 []) := by native_decide
 
 -- An empty ByteString is a definite 0-length string (0x40), not zero bytes, and round-trips.
 -- (The bare 0x40 and the empty-B-in-map cases are byte-anchored in the reference fixtures below.)
-example : (encodeData (.B { data := "" })).bind decodeData = .some ("", .B { data := "" }) := by native_decide
+example : (encodeData (.B { data := "" })).bind decodeData = .some (.empty, .B { data := "" }) := by native_decide
 example : (encodeData (.List [.B { data := "" }, .I 5])).bind decodeData
-  = .some ("", .List [.B { data := "" }, .I 5]) := by native_decide
+  = .some (.empty, .List [.B { data := "" }, .I 5]) := by native_decide
 
 -- Constructor index > 127 uses the tag-102 fallback. The index must be a direct Word64: in-range
 -- indices (128, 2^63-1, 2^64-1) are byte-anchored in the reference fixtures below. An index >= 2^64
@@ -135,7 +144,7 @@ example : (encodeData (.Constr (-1) [])).bind decodeData = .none := by native_de
 
 -- Map round-trips through decodePairList (definite-length map header + key/value pairs).
 example : (encodeData (.Map [(.I 1, .B { data := "aa" }), (.List [], .Constr 3 [.I 4])])).bind decodeData
-  = .some ("", .Map [(.I 1, .B { data := "aa" }), (.List [], .Constr 3 [.I 4])]) := by native_decide
+  = .some (.empty, .Map [(.I 1, .B { data := "aa" }), (.List [], .Constr 3 [.I 4])]) := by native_decide
 
 -- Reference fixtures: golden CBOR vectors for the shapes this PR touches (empty containers, empty
 -- bytestring, negative bignums, tag-102 indices, nesting). Each pins `encodeData` to fixed bytes
@@ -143,43 +152,47 @@ example : (encodeData (.Map [(.I 1, .B { data := "aa" }), (.List [], .Constr 3 [
 -- reference (`Data.hs` / cborg / RFC 8949), hand-verifiable byte by byte, so the encode direction
 -- is a genuine anchor and not a self-referential round-trip.
 -- emptyList
-example : encodeData (.List []) = .some "\x80" := by native_decide
-example : decodeData "\x80" = .some ("", .List []) := by native_decide
+example : encodeData (.List []) = .some ⟨#[0x80]⟩ := by native_decide
+example : decodeData ⟨#[0x80]⟩ = .some (.empty, .List []) := by native_decide
 -- emptyConstr0
-example : encodeData (.Constr 0 []) = .some "\xd8\x79\x80" := by native_decide
-example : decodeData "\xd8\x79\x80" = .some ("", .Constr 0 []) := by native_decide
+example : encodeData (.Constr 0 []) = .some ⟨#[0xd8, 0x79, 0x80]⟩ := by native_decide
+example : decodeData ⟨#[0xd8, 0x79, 0x80]⟩ = .some (.empty, .Constr 0 []) := by native_decide
 -- emptyConstr5
-example : encodeData (.Constr 5 []) = .some "\xd8\x7e\x80" := by native_decide
-example : decodeData "\xd8\x7e\x80" = .some ("", .Constr 5 []) := by native_decide
+example : encodeData (.Constr 5 []) = .some ⟨#[0xd8, 0x7e, 0x80]⟩ := by native_decide
+example : decodeData ⟨#[0xd8, 0x7e, 0x80]⟩ = .some (.empty, .Constr 5 []) := by native_decide
 -- emptyB
-example : encodeData (.B { data := "" }) = .some "\x40" := by native_decide
-example : decodeData "\x40" = .some ("", .B { data := "" }) := by native_decide
+example : encodeData (.B { data := "" }) = .some ⟨#[0x40]⟩ := by native_decide
+example : decodeData ⟨#[0x40]⟩ = .some (.empty, .B { data := "" }) := by native_decide
 -- mapEmptyB
-example : encodeData (.Map [(.B { data := "" }, .I 0)]) = .some "\xa1\x40\x00" := by native_decide
-example : decodeData "\xa1\x40\x00" = .some ("", .Map [(.B { data := "" }, .I 0)]) := by native_decide
+example : encodeData (.Map [(.B { data := "" }, .I 0)]) = .some ⟨#[0xa1, 0x40, 0x00]⟩ := by native_decide
+example : decodeData ⟨#[0xa1, 0x40, 0x00]⟩ = .some (.empty, .Map [(.B { data := "" }, .I 0)]) := by native_decide
 -- negBignum64
-example : encodeData (.I (-(2 ^ 64 + 1))) = .some "\xc3\x49\x01\x00\x00\x00\x00\x00\x00\x00\x00" := by native_decide
-example : decodeData "\xc3\x49\x01\x00\x00\x00\x00\x00\x00\x00\x00" = .some ("", .I (-(2 ^ 64 + 1))) := by native_decide
+example : encodeData (.I (-(2 ^ 64 + 1))) = .some ⟨#[0xc3, 0x49, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]⟩ := by native_decide
+example : decodeData ⟨#[0xc3, 0x49, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]⟩ = .some (.empty, .I (-(2 ^ 64 + 1))) := by native_decide
 -- negBignum128
-example : encodeData (.I (-(2 ^ 128))) = .some "\xc3\x50\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" := by native_decide
-example : decodeData "\xc3\x50\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" = .some ("", .I (-(2 ^ 128))) := by native_decide
+example : encodeData (.I (-(2 ^ 128))) = .some ⟨#[0xc3, 0x50, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]⟩ := by native_decide
+example : decodeData ⟨#[0xc3, 0x50, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]⟩ = .some (.empty, .I (-(2 ^ 128))) := by native_decide
 -- constr128
-example : encodeData (.Constr 128 []) = .some "\xd8\x66\x82\x18\x80\x80" := by native_decide
-example : decodeData "\xd8\x66\x82\x18\x80\x80" = .some ("", .Constr 128 []) := by native_decide
+example : encodeData (.Constr 128 []) = .some ⟨#[0xd8, 0x66, 0x82, 0x18, 0x80, 0x80]⟩ := by native_decide
+example : decodeData ⟨#[0xd8, 0x66, 0x82, 0x18, 0x80, 0x80]⟩ = .some (.empty, .Constr 128 []) := by native_decide
 -- constrBig (2^63-1)
-example : encodeData (.Constr (2 ^ 63 - 1) [.I 1]) = .some "\xd8\x66\x82\x1b\x7f\xff\xff\xff\xff\xff\xff\xff\x9f\x01\xff" := by native_decide
-example : decodeData "\xd8\x66\x82\x1b\x7f\xff\xff\xff\xff\xff\xff\xff\x9f\x01\xff" = .some ("", .Constr (2 ^ 63 - 1) [.I 1]) := by native_decide
+example : encodeData (.Constr (2 ^ 63 - 1) [.I 1]) = .some ⟨#[0xd8, 0x66, 0x82, 0x1b, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x9f, 0x01, 0xff]⟩ := by native_decide
+example : decodeData ⟨#[0xd8, 0x66, 0x82, 0x1b, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x9f, 0x01, 0xff]⟩ = .some (.empty, .Constr (2 ^ 63 - 1) [.I 1]) := by native_decide
 -- constrMax (2^64-1, the largest in-range Word64 index)
-example : encodeData (.Constr (2 ^ 64 - 1) [.I 1]) = .some "\xd8\x66\x82\x1b\xff\xff\xff\xff\xff\xff\xff\xff\x9f\x01\xff" := by native_decide
-example : decodeData "\xd8\x66\x82\x1b\xff\xff\xff\xff\xff\xff\xff\xff\x9f\x01\xff" = .some ("", .Constr (2 ^ 64 - 1) [.I 1]) := by native_decide
+example : encodeData (.Constr (2 ^ 64 - 1) [.I 1]) = .some ⟨#[0xd8, 0x66, 0x82, 0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x9f, 0x01, 0xff]⟩ := by native_decide
+example : decodeData ⟨#[0xd8, 0x66, 0x82, 0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x9f, 0x01, 0xff]⟩ = .some (.empty, .Constr (2 ^ 64 - 1) [.I 1]) := by native_decide
 -- nested
-example : encodeData (.Constr 0 [.List [], .I 5]) = .some "\xd8\x79\x9f\x80\x05\xff" := by native_decide
-example : decodeData "\xd8\x79\x9f\x80\x05\xff" = .some ("", .Constr 0 [.List [], .I 5]) := by native_decide
+example : encodeData (.Constr 0 [.List [], .I 5]) = .some ⟨#[0xd8, 0x79, 0x9f, 0x80, 0x05, 0xff]⟩ := by native_decide
+example : decodeData ⟨#[0xd8, 0x79, 0x9f, 0x80, 0x05, 0xff]⟩ = .some (.empty, .Constr 0 [.List [], .I 5]) := by native_decide
 -- mapKV
-example : encodeData (.Map [(.I 0, .I 1)]) = .some "\xa1\x00\x01" := by native_decide
-example : decodeData "\xa1\x00\x01" = .some ("", .Map [(.I 0, .I 1)]) := by native_decide
+example : encodeData (.Map [(.I 0, .I 1)]) = .some ⟨#[0xa1, 0x00, 0x01]⟩ := by native_decide
+example : decodeData ⟨#[0xa1, 0x00, 0x01]⟩ = .some (.empty, .Map [(.I 0, .I 1)]) := by native_decide
 -- listII
-example : encodeData (.List [.I 1, .I 2]) = .some "\x9f\x01\x02\xff" := by native_decide
-example : decodeData "\x9f\x01\x02\xff" = .some ("", .List [.I 1, .I 2]) := by native_decide
+example : encodeData (.List [.I 1, .I 2]) = .some ⟨#[0x9f, 0x01, 0x02, 0xff]⟩ := by native_decide
+example : decodeData ⟨#[0x9f, 0x01, 0x02, 0xff]⟩ = .some (.empty, .List [.I 1, .I 2]) := by native_decide
+
+-- Bignum decode: reads the big-endian bytestring back to 2^64 (round-trips with encoding above).
+example : decodeData (s2ba "\xc2\x49\x01\x00\x00\x00\x00\x00\x00\x00\x00") =
+  .some (s2ba "", .I 18446744073709551616) := by native_decide
 
 end PlutusCore.Cbor
